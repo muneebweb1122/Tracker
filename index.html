@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Location Tracker</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#f4f7f6; --card:#fff; --accent:#00796b; --text:#1b2b2a; --muted:#6b7c7a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { background:var(--accent); color:#fff; padding:14px 16px; display:flex; justify-content:space-between; align-items:center; }
+  header h1 { font-size:18px; margin:0; }
+  main { padding:14px; max-width:520px; margin:0 auto; }
+  .card { background:var(--card); border-radius:12px; padding:14px; margin-bottom:12px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  h2 { font-size:15px; margin:0 0 10px; }
+  input { width:100%; padding:12px; margin:6px 0; border:1px solid #cfd8d6; border-radius:8px; font-size:16px; }
+  button { background:var(--accent); color:#fff; border:0; padding:12px 16px; border-radius:8px; font-size:15px; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); }
+  button.red { background:#c62828; }
+  button.small { padding:8px 12px; font-size:13px; }
+  .row { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #eef2f1; }
+  .row:last-child { border-bottom:0; }
+  .uid { font-size:28px; font-weight:700; letter-spacing:3px; color:var(--accent); }
+  .muted { color:var(--muted); font-size:13px; }
+  .switch { display:flex; align-items:center; justify-content:space-between; margin-top:10px; }
+  #map { height:70vh; border-radius:12px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Location Tracker</h1>
+  <button class="ghost small" id="logoutBtn" style="color:#fff" hidden>Logout</button>
+</header>
+
+<main>
+  <!-- AUTH -->
+  <section id="authView" class="card">
+    <h2 id="authTitle">Create account</h2>
+    <input id="name" placeholder="Name">
+    <input id="email" type="email" placeholder="Email">
+    <input id="pass" type="password" placeholder="Password (min 6)">
+    <button id="authBtn" style="width:100%;margin-top:8px">Sign up</button>
+    <button class="ghost" id="toggleAuth" style="width:100%">Already have an account? Login</button>
+    <p class="muted" id="authMsg"></p>
+  </section>
+
+  <!-- HOME -->
+  <section id="homeView" class="hidden">
+    <div class="card">
+      <div class="muted">Your UID (share with friends)</div>
+      <div class="uid" id="myUid">------</div>
+      <div class="switch">
+        <span>Share my live location</span>
+        <input type="checkbox" id="shareToggle" style="width:auto;transform:scale(1.5)">
+      </div>
+      <div class="muted" id="shareStatus"></div>
+    </div>
+
+    <div class="card">
+      <h2>Track a friend</h2>
+      <input id="friendUid" inputmode="numeric" maxlength="6" placeholder="Friend's 6-digit UID">
+      <button id="reqBtn" style="width:100%">Send request</button>
+      <div class="muted" id="reqMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Incoming requests</h2>
+      <div id="incoming" class="muted">None</div>
+    </div>
+
+    <div class="card">
+      <h2>People I can track</h2>
+      <div id="trackable" class="muted">None yet</div>
+    </div>
+  </section>
+
+  <!-- MAP -->
+  <section id="mapView" class="hidden">
+    <button class="ghost" id="backBtn">&larr; Back</button>
+    <h2 id="mapTitle"></h2>
+    <div id="mapMsg" class="muted"></div>
+    <div id="map"></div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword,
+         signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where,
+         getDocs, onSnapshot, serverTimestamp, limit } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+// ====== PASTE YOUR FIREBASE CONFIG HERE ======
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT",
+  appId: "YOUR_APP_ID"
+};
+// =============================================
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const $ = id => document.getElementById(id);
+
+let me = null, signup = true, watchId = null, unsubs = [], map = null, marker = null, mapUnsub = null;
+
+// ---------- AUTH ----------
+$("toggleAuth").onclick = () => {
+  signup = !signup;
+  $("authTitle").textContent = signup ? "Create account" : "Login";
+  $("authBtn").textContent = signup ? "Sign up" : "Login";
+  $("name").classList.toggle("hidden", !signup);
+  $("toggleAuth").textContent = signup ? "Already have an account? Login" : "New here? Sign up";
+};
+
+async function newUid6() {
+  while (true) {
+    const code = String(100000 + Math.floor(Math.random() * 900000));
+    const q = await getDocs(query(collection(db, "users"), where("uid6", "==", code), limit(1)));
+    if (q.empty) return code;
+  }
+}
+
+$("authBtn").onclick = async () => {
+  $("authMsg").textContent = "";
+  try {
+    const email = $("email").value.trim(), pass = $("pass").value;
+    if (signup) {
+      const cred = await createUserWithEmailAndPassword(auth, email, pass);
+      await setDoc(doc(db, "users", cred.user.uid), {
+        name: $("name").value.trim() || "User", uid6: await newUid6(), sharing: false
+      });
+    } else {
+      await signInWithEmailAndPassword(auth, email, pass);
+    }
+  } catch (e) { $("authMsg").textContent = e.message; }
+};
+
+$("logoutBtn").onclick = async () => { await stopSharing(); await signOut(auth); };
+
+onAuthStateChanged(auth, user => {
+  me = user;
+  unsubs.forEach(u => u()); unsubs = [];
+  if (!user) { show("authView"); $("logoutBtn").hidden = true; return; }
+  $("logoutBtn").hidden = false;
+  show("homeView");
+  startHome();
+});
+
+function show(id) {
+  ["authView", "homeView", "mapView"].forEach(v => $(v).classList.toggle("hidden", v !== id));
+}
+
+// ---------- HOME ----------
+function startHome() {
+  unsubs.push(onSnapshot(doc(db, "users", me.uid), s => {
+    const d = s.data(); if (!d) return;
+    $("myUid").textContent = d.uid6;
+    $("shareToggle").checked = !!d.sharing;
+  }));
+
+  // incoming requests
+  unsubs.push(onSnapshot(query(collection(db, "requests"), where("to", "==", me.uid)), async snap => {
+    const box = $("incoming"); box.innerHTML = "";
+    if (snap.empty) { box.textContent = "None"; return; }
+    for (const r of snap.docs) {
+      const d = r.data();
+      const u = await getDoc(doc(db, "users", d.from));
+      const row = document.createElement("div"); row.className = "row";
+      row.innerHTML = `<div><b>${esc(u.data()?.name || "User")}</b><div class="muted">${d.status}</div></div><div></div>`;
+      const btns = row.lastChild;
+      if (d.status === "pending") {
+        const ok = mk("Accept", "small", () => updateDoc(r.ref, { status: "accepted" }));
+        btns.appendChild(ok);
+      }
+      btns.appendChild(mk(d.status === "pending" ? "Reject" : "Remove", "small red", () => deleteDoc(r.ref)));
+      box.appendChild(row);
+    }
+  }));
+
+  // people I can track
+  unsubs.push(onSnapshot(query(collection(db, "requests"), where("from", "==", me.uid), where("status", "==", "accepted")), async snap => {
+    const box = $("trackable"); box.innerHTML = "";
+    if (snap.empty) { box.textContent = "None yet"; return; }
+    for (const r of snap.docs) {
+      const target = r.data().to;
+      const u = await getDoc(doc(db, "users", target));
+      const row = document.createElement("div"); row.className = "row";
+      row.innerHTML = `<b>${esc(u.data()?.name || "User")}</b>`;
+      row.appendChild(mk("View map", "small", () => openMap(target, u.data()?.name || "User")));
+      box.appendChild(row);
+    }
+  }));
+}
+
+$("reqBtn").onclick = async () => {
+  const code = $("friendUid").value.trim();
+  $("reqMsg").textContent = "";
+  const q = await getDocs(query(collection(db, "users"), where("uid6", "==", code), limit(1)));
+  if (q.empty) { $("reqMsg").textContent = "User not found"; return; }
+  const target = q.docs[0].id;
+  if (target === me.uid) { $("reqMsg").textContent = "That is your own UID"; return; }
+  await setDoc(doc(db, "requests", `${me.uid}_${target}`), { from: me.uid, to: target, status: "pending" });
+  $("friendUid").value = "";
+  $("reqMsg").textContent = "Request sent. Waiting for friend to accept.";
+};
+
+// ---------- SHARING ----------
+$("shareToggle").onchange = e => e.target.checked ? startSharing() : stopSharing();
+
+function startSharing() {
+  if (!navigator.geolocation) { $("shareStatus").textContent = "Geolocation not supported"; return; }
+  watchId = navigator.geolocation.watchPosition(async pos => {
+    await updateDoc(doc(db, "users", me.uid), { sharing: true });
+    await setDoc(doc(db, "locations", me.uid), {
+      lat: pos.coords.latitude, lng: pos.coords.longitude, updatedAt: serverTimestamp()
+    });
+    $("shareStatus").textContent = "Sharing live location (keep this page open)";
+  }, err => {
+    $("shareStatus").textContent = "Location error: " + err.message;
+    $("shareToggle").checked = false;
+  }, { enableHighAccuracy: true, maximumAge: 5000 });
+}
+
+async function stopSharing() {
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  if (me) {
+    try {
+      await updateDoc(doc(db, "users", me.uid), { sharing: false });
+      await deleteDoc(doc(db, "locations", me.uid));
+    } catch (e) {}
+  }
+  $("shareStatus").textContent = "";
+}
+
+// ---------- MAP ----------
+function openMap(uid, name) {
+  show("mapView");
+  $("mapTitle").textContent = name;
+  $("mapMsg").textContent = "Waiting for location...";
+  if (!map) {
+    map = L.map("map").setView([30, 70], 5);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap" }).addTo(map);
+  }
+  setTimeout(() => map.invalidateSize(), 100);
+  if (mapUnsub) mapUnsub();
+  let first = true;
+  mapUnsub = onSnapshot(doc(db, "locations", uid), s => {
+    const d = s.data();
+    if (!d) { $("mapMsg").textContent = "Friend is not sharing location right now"; return; }
+    $("mapMsg").textContent = "Live";
+    const ll = [d.lat, d.lng];
+    if (!marker) marker = L.marker(ll).addTo(map); else marker.setLatLng(ll);
+    if (first) { map.setView(ll, 16); first = false; } else map.panTo(ll);
+  });
+}
+
+$("backBtn").onclick = () => { if (mapUnsub) mapUnsub(); mapUnsub = null; show("homeView"); };
+
+// ---------- helpers ----------
+function mk(text, cls, fn) { const b = document.createElement("button"); b.textContent = text; b.className = cls; b.onclick = fn; return b; }
+function esc(s) { return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+</script>
+</body>
+</html>
