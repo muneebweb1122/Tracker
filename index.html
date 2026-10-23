@@ -206,13 +206,13 @@ function startHome() {
       row.innerHTML = `<div><b>${esc(u.data()?.name || "User")}</b><div class="muted">${d.status}</div></div><div></div>`;
       const btns = row.lastChild;
       if (d.status === "pending") {
-        const ok = mk("Accept", "small", () => updateDoc(r.ref, { status: "accepted" }));
+        const ok = mk("Accept", "small", () => updateDoc(r.ref, { status: "accepted" }).catch(e => alert("Error: " + e.message)));
         btns.appendChild(ok);
       }
       btns.appendChild(mk(d.status === "pending" ? "Reject" : "Remove", "small red", () => deleteDoc(r.ref)));
       box.appendChild(row);
     }
-  }));
+  }, err => { $("incoming").textContent = "Error: " + err.message; }));
 
   // people I can track
   unsubs.push(onSnapshot(query(collection(db, "requests"), where("from", "==", me.uid), where("status", "==", "accepted")), async snap => {
@@ -233,19 +233,23 @@ function startHome() {
       row.appendChild(mk("View map", "small", () => openMap(target, u.data()?.name || "User")));
       box.appendChild(row);
     }
-  }));
+  }, err => { $("trackable").textContent = "Error: " + err.message; }));
 }
 
 $("reqBtn").onclick = async () => {
   const code = $("friendUid").value.trim();
   $("reqMsg").textContent = "";
-  const q = await getDocs(query(collection(db, "users"), where("uid6", "==", code), limit(1)));
-  if (q.empty) { $("reqMsg").textContent = "User not found"; return; }
-  const target = q.docs[0].id;
-  if (target === me.uid) { $("reqMsg").textContent = "That is your own UID"; return; }
-  await setDoc(doc(db, "requests", `${me.uid}_${target}`), { from: me.uid, to: target, status: "pending" });
-  $("friendUid").value = "";
-  $("reqMsg").textContent = "Request sent. Waiting for friend to accept.";
+  try {
+    const q = await getDocs(query(collection(db, "users"), where("uid6", "==", code), limit(1)));
+    if (q.empty) { $("reqMsg").textContent = "User not found. Check the 6-digit UID."; return; }
+    const target = q.docs[0].id;
+    if (target === me.uid) { $("reqMsg").textContent = "That is your own UID"; return; }
+    await setDoc(doc(db, "requests", `${me.uid}_${target}`), { from: me.uid, to: target, status: "pending" });
+    $("friendUid").value = "";
+    $("reqMsg").textContent = "Request sent. Waiting for friend to accept.";
+  } catch (e) {
+    $("reqMsg").textContent = "Error: " + e.message;
+  }
 };
 
 // ---------- SHARING ----------
