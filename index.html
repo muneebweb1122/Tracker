@@ -26,6 +26,11 @@
   .switch { display:flex; align-items:center; justify-content:space-between; margin-top:10px; }
   #map { height:70vh; border-radius:12px; }
   .hidden { display:none; }
+  #msgs { height:60vh; overflow-y:auto; background:#e8efed; border-radius:12px; padding:10px; display:flex; flex-direction:column; gap:6px; }
+  .bubble { max-width:78%; padding:8px 12px; border-radius:14px; font-size:15px; word-wrap:break-word; background:#fff; align-self:flex-start; }
+  .bubble.mine { background:#b2dfdb; align-self:flex-end; }
+  .sendrow { display:flex; gap:8px; margin-top:8px; }
+  .sendrow input { margin:0; }
 </style>
 </head>
 <body>
@@ -74,6 +79,22 @@
       <h2>People I can track</h2>
       <div id="trackable" class="muted">None yet</div>
     </div>
+
+    <div class="card">
+      <h2>Chats</h2>
+      <div id="friendsList" class="muted">No friends yet. Accepted requests appear here.</div>
+    </div>
+  </section>
+
+  <!-- CHAT -->
+  <section id="chatView" class="hidden">
+    <button class="ghost" id="chatBack">&larr; Back</button>
+    <h2 id="chatTitle"></h2>
+    <div id="msgs"></div>
+    <div class="sendrow">
+      <input id="msgInput" placeholder="Type a message" autocomplete="off">
+      <button id="sendBtn">Send</button>
+    </div>
   </section>
 
   <!-- MAP -->
@@ -91,7 +112,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword,
          signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where,
-         getDocs, onSnapshot, serverTimestamp, limit } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+         getDocs, onSnapshot, serverTimestamp, limit, addDoc, orderBy } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 // ====== PASTE YOUR FIREBASE CONFIG HERE ======
 const firebaseConfig = {
@@ -107,6 +128,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const $ = id => document.getElementById(id);
 
+let friends = {}, chatUnsub = null, chatFriend = null;
 let me = null, signup = true, watchId = null, unsubs = [], map = null, marker = null, mapUnsub = null;
 
 // ---------- AUTH ----------
@@ -145,7 +167,7 @@ $("logoutBtn").onclick = async () => { await stopSharing(); await signOut(auth);
 
 onAuthStateChanged(auth, user => {
   me = user;
-  unsubs.forEach(u => u()); unsubs = [];
+  unsubs.forEach(u => u()); unsubs = []; friends = {};
   if (!user) { show("authView"); $("logoutBtn").hidden = true; return; }
   $("logoutBtn").hidden = false;
   show("homeView");
@@ -153,7 +175,7 @@ onAuthStateChanged(auth, user => {
 });
 
 function show(id) {
-  ["authView", "homeView", "mapView"].forEach(v => $(v).classList.toggle("hidden", v !== id));
+  ["authView", "homeView", "mapView", "chatView"].forEach(v => $(v).classList.toggle("hidden", v !== id));
 }
 
 // ---------- HOME ----------
@@ -167,6 +189,15 @@ function startHome() {
   // incoming requests
   unsubs.push(onSnapshot(query(collection(db, "requests"), where("to", "==", me.uid)), async snap => {
     const box = $("incoming"); box.innerHTML = "";
+    Object.keys(friends).forEach(k => { if (friends[k].via === "in") delete friends[k]; });
+    for (const r of snap.docs) {
+      const d = r.data();
+      if (d.status === "accepted") {
+        const fu = await getDoc(doc(db, "users", d.from));
+        if (!friends[d.from]) friends[d.from] = { name: fu.data()?.name || "User", via: "in" };
+      }
+    }
+    renderFriends();
     if (snap.empty) { box.textContent = "None"; return; }
     for (const r of snap.docs) {
       const d = r.data();
@@ -186,6 +217,13 @@ function startHome() {
   // people I can track
   unsubs.push(onSnapshot(query(collection(db, "requests"), where("from", "==", me.uid), where("status", "==", "accepted")), async snap => {
     const box = $("trackable"); box.innerHTML = "";
+    Object.keys(friends).forEach(k => { if (friends[k].via === "out") delete friends[k]; });
+    for (const r of snap.docs) {
+      const t = r.data().to;
+      const tu = await getDoc(doc(db, "users", t));
+      friends[t] = { name: tu.data()?.name || "User", via: "out" };
+    }
+    renderFriends();
     if (snap.empty) { box.textContent = "None yet"; return; }
     for (const r of snap.docs) {
       const target = r.data().to;
@@ -261,6 +299,53 @@ function openMap(uid, name) {
 }
 
 $("backBtn").onclick = () => { if (mapUnsub) mapUnsub(); mapUnsub = null; show("homeView"); };
+
+// ---------- CHAT ----------
+function renderFriends() {
+  const box = $("friendsList"); box.innerHTML = "";
+  const ids = Object.keys(friends);
+  if (!ids.length) { box.textContent = "No friends yet. Accepted requests appear here."; return; }
+  ids.forEach(id => {
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = `<b>${esc(friends[id].name)}</b>`;
+    row.appendChild(mk("Chat", "small", () => openChat(id)));
+    box.appendChild(row);
+  });
+}
+
+const chatId = other => [me.uid, other].sort().join("_");
+
+function openChat(other) {
+  chatFriend = other;
+  show("chatView");
+  $("chatTitle").textContent = friends[other]?.name || "Chat";
+  $("msgs").innerHTML = "";
+  if (chatUnsub) chatUnsub();
+  const q = query(collection(db, "chats", chatId(other), "messages"), orderBy("createdAt"));
+  chatUnsub = onSnapshot(q, snap => {
+    const box = $("msgs"); box.innerHTML = "";
+    snap.docs.forEach(m => {
+      const d = m.data();
+      const b = document.createElement("div");
+      b.className = "bubble" + (d.from === me.uid ? " mine" : "");
+      b.textContent = d.text;
+      box.appendChild(b);
+    });
+    box.scrollTop = box.scrollHeight;
+  }, err => { $("msgs").textContent = "Chat error: " + err.message; });
+}
+
+async function sendMsg() {
+  const text = $("msgInput").value.trim();
+  if (!text || !chatFriend) return;
+  $("msgInput").value = "";
+  await addDoc(collection(db, "chats", chatId(chatFriend), "messages"), {
+    from: me.uid, text, createdAt: serverTimestamp()
+  });
+}
+$("sendBtn").onclick = sendMsg;
+$("msgInput").addEventListener("keydown", e => { if (e.key === "Enter") sendMsg(); });
+$("chatBack").onclick = () => { if (chatUnsub) chatUnsub(); chatUnsub = null; show("homeView"); };
 
 // ---------- helpers ----------
 function mk(text, cls, fn) { const b = document.createElement("button"); b.textContent = text; b.className = cls; b.onclick = fn; return b; }
